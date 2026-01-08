@@ -1,7 +1,16 @@
 frappe.ready(() => {
+    // Only run on batch pages
+    if (!window.location.pathname.includes("/batches/")) return;
+
     const interval = setInterval(() => {
-        // LMS batch action header (exists only on batch detail page)
-        const actionContainer = document.querySelector(".batch-header-actions");
+        // Try multiple possible selectors for LMS batch page
+        const actionContainer =
+            document.querySelector(".batch-header-actions") ||
+            document.querySelector(".page-actions") ||
+            document.querySelector(".batch-details .actions") ||
+            document.querySelector(".batch-hero .actions") ||
+            document.querySelector(".container .d-flex.justify-content-between") ||
+            document.querySelector(".batch-header");
 
         if (!actionContainer) return;
 
@@ -12,40 +21,21 @@ frappe.ready(() => {
 
         const btn = document.createElement("button");
         btn.id = "vr-class-btn";
-        btn.className = "btn btn-primary btn-sm";
+        btn.className = "btn btn-primary btn-sm ml-2";
         btn.innerText = "Live VR Class";
+        btn.style.marginLeft = "10px";
 
         btn.onclick = () => {
-            // Get the batch name from the route
-            const batchName = frappe.get_route()[2];
+            // Get the batch name from the URL path
+            const pathParts = window.location.pathname.split("/");
+            const batchIndex = pathParts.indexOf("batches");
+            const batchName = batchIndex !== -1 ? pathParts[batchIndex + 1] : "";
 
-            // Option 1: Redirect to custom VR URL directly
-            // Replace this URL with your actual VR class URL
-           const vrClassUrl = "https://synlect-lms.m.frappe.cloud/streaming";
-            // const vrClassUrl = "https://your-vr-platform.com/class/" + encodeURIComponent(batchName);
+            // Redirect to VR class URL
+            const vrClassUrl = "https://synlect-lms.m.frappe.cloud/streaming";
             window.open(vrClassUrl, "_blank");
-
-            // Option 2: If you need to call a backend API first to get the URL
-            // Uncomment below and comment out the above
-            /*
-            frappe.call({
-                method: "lms_synlect.api.get_vr_class_url",
-                args: {
-                    batch: batchName
-                },
-                freeze: true,
-                freeze_message: "Loading VR Class...",
-                callback: function(r) {
-                    if (r.message && r.message.url) {
-                        window.open(r.message.url, "_blank");
-                    } else {
-                        frappe.msgprint("VR Class URL not configured for this batch.");
-                    }
-                }
-            });
-            */
         };
 
         actionContainer.appendChild(btn);
-    }, 400);
+    }, 500);
 });
