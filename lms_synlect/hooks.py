@@ -32,6 +32,11 @@ app_license = "mit"
 # web_include_css = "/assets/lms_synlect/css/lms_synlect.css"
 # web_include_js = "/assets/lms_synlect/js/lms_synlect.js"
 
+# Include custom JS for LMS batch page
+app_include_js = [
+    "/assets/lms_synlect/js/lms_batch_button.js"
+]
+
 # include custom scss in every website theme (without file extension ".scss")
 # website_theme_scss = "lms_synlect/public/scss/website"
 
