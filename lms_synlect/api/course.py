@@ -10,12 +10,26 @@ from frappe.utils import cint, flt
 
 
 def get_course_image(course_doc):
-    """Get the course image URL"""
+    """Get the course image URL - returns full URL for Frappe Cloud"""
+    image_path = None
+
+    # Check various possible image field names in Frappe LMS
     if hasattr(course_doc, 'image') and course_doc.image:
-        return course_doc.image
-    if hasattr(course_doc, 'hero_image') and course_doc.hero_image:
-        return course_doc.hero_image
-    return ""
+        image_path = course_doc.image
+    elif hasattr(course_doc, 'hero_image') and course_doc.hero_image:
+        image_path = course_doc.hero_image
+    elif hasattr(course_doc, 'course_image') and course_doc.course_image:
+        image_path = course_doc.course_image
+
+    if not image_path:
+        return ""
+
+    # If already a full URL, return as-is
+    if image_path.startswith('http://') or image_path.startswith('https://'):
+        return image_path
+
+    # Return the path as-is (frontend will add the base URL)
+    return image_path
 
 
 def get_course_instructor(course_doc):
@@ -699,4 +713,1216 @@ def get_course_curriculum(course_id):
             "success": False,
             "curriculum": [],
             "message": _("An error occurred while fetching curriculum")
+        }
+
+
+# ==================== COURSE CREATION API ====================
+
+@frappe.whitelist()
+def create_course(
+    title=None,
+    description=None,
+    short_introduction=None,
+    category=None,
+    level=None,
+    price=None,
+    duration=None,
+    image=None,
+    is_featured=False,
+    chapters=None
+):
+    """
+    Create a new course with optional chapters and lessons
+
+    Args:
+        title: Course title (required)
+        description: Full course description
+        short_introduction: Short intro for cards
+        category: Course category
+        level: Course level (Basic, Intermediate, Advanced)
+        price: Course price (0 for free)
+        duration: Course duration string
+        image: Course image path
+        is_featured: Whether course is featured
+        chapters: JSON array of chapters with lessons
+            [{"title": "Chapter 1", "description": "...", "lessons": [{"title": "Lesson 1", "content": "..."}]}]
+
+    Returns:
+        {
+            "success": bool,
+            "course_id": Course document name,
+            "message": Status message
+        }
+    """
+    try:
+        # Validate required fields
+        if not title:
+            return {
+                "success": False,
+                "message": _("Course title is required")
+            }
+
+        # Get current user as instructor
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required to create courses")
+            }
+
+        # Parse chapters if provided as JSON string
+        if chapters and isinstance(chapters, str):
+            try:
+                chapters = json.loads(chapters)
+            except json.JSONDecodeError:
+                chapters = None
+
+        # Create course document
+        course_doc = frappe.new_doc("LMS Course")
+        course_doc.title = title
+        course_doc.owner = current_user
+
+        # Set optional fields if they exist
+        if description and hasattr(course_doc, 'description'):
+            course_doc.description = description
+        if short_introduction and hasattr(course_doc, 'short_introduction'):
+            course_doc.short_introduction = short_introduction
+        if category and hasattr(course_doc, 'category'):
+            course_doc.category = category
+        if level:
+            if hasattr(course_doc, 'level'):
+                course_doc.level = level
+            elif hasattr(course_doc, 'difficulty'):
+                course_doc.difficulty = level
+        if price is not None:
+            if hasattr(course_doc, 'course_price'):
+                course_doc.course_price = flt(price)
+            if hasattr(course_doc, 'price'):
+                course_doc.price = flt(price)
+            if hasattr(course_doc, 'paid'):
+                course_doc.paid = 1 if flt(price) > 0 else 0
+        if duration and hasattr(course_doc, 'duration'):
+            course_doc.duration = duration
+        if image and hasattr(course_doc, 'image'):
+            course_doc.image = image
+        if is_featured:
+            if hasattr(course_doc, 'featured'):
+                course_doc.featured = 1
+            elif hasattr(course_doc, 'is_featured'):
+                course_doc.is_featured = 1
+
+        # Set instructor field if exists
+        if hasattr(course_doc, 'instructor'):
+            course_doc.instructor = current_user
+
+        # Set published to true by default
+        if hasattr(course_doc, 'published'):
+            course_doc.published = 1
+
+        course_doc.insert()
+        course_name = course_doc.name
+
+        # Create chapters and lessons if provided
+        if chapters and isinstance(chapters, list):
+            for idx, chapter_data in enumerate(chapters, 1):
+                if frappe.db.exists("DocType", "Course Chapter"):
+                    chapter_doc = frappe.new_doc("Course Chapter")
+                    chapter_doc.course = course_name
+                    chapter_doc.title = chapter_data.get("title", f"Chapter {idx}")
+                    if hasattr(chapter_doc, 'description'):
+                        chapter_doc.description = chapter_data.get("description", "")
+                    chapter_doc.idx = idx
+                    chapter_doc.insert()
+
+                    # Create lessons for this chapter
+                    lessons = chapter_data.get("lessons", [])
+                    for lesson_idx, lesson_data in enumerate(lessons, 1):
+                        if frappe.db.exists("DocType", "Course Lesson"):
+                            lesson_doc = frappe.new_doc("Course Lesson")
+                            lesson_doc.chapter = chapter_doc.name
+                            lesson_doc.title = lesson_data.get("title", f"Lesson {lesson_idx}")
+                            if hasattr(lesson_doc, 'content'):
+                                lesson_doc.content = lesson_data.get("content", "")
+                            if hasattr(lesson_doc, 'course'):
+                                lesson_doc.course = course_name
+                            if hasattr(lesson_doc, 'include_in_preview'):
+                                lesson_doc.include_in_preview = lesson_data.get("isPreview", 0)
+                            if hasattr(lesson_doc, 'video_url'):
+                                lesson_doc.video_url = lesson_data.get("videoUrl", "")
+                            lesson_doc.idx = lesson_idx
+                            lesson_doc.insert()
+
+        frappe.db.commit()
+
+        return {
+            "success": True,
+            "course_id": course_name,
+            "message": _("Course created successfully")
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Create course error: {str(e)}", "Course API")
+        frappe.db.rollback()
+        return {
+            "success": False,
+            "message": str(e) if frappe.conf.developer_mode else _("An error occurred while creating the course")
+        }
+
+
+@frappe.whitelist()
+def update_course(
+    course_id=None,
+    title=None,
+    description=None,
+    short_introduction=None,
+    category=None,
+    level=None,
+    price=None,
+    duration=None,
+    image=None,
+    is_featured=None,
+    published=None
+):
+    """
+    Update an existing course
+
+    Args:
+        course_id: Course document name (required)
+        Other args: Fields to update
+
+    Returns:
+        {
+            "success": bool,
+            "message": Status message
+        }
+    """
+    try:
+        if not course_id:
+            return {
+                "success": False,
+                "message": _("Course ID is required")
+            }
+
+        if not frappe.db.exists("LMS Course", course_id):
+            return {
+                "success": False,
+                "message": _("Course not found")
+            }
+
+        current_user = frappe.session.user
+        course_doc = frappe.get_doc("LMS Course", course_id)
+
+        # Check if user owns the course or is admin
+        is_owner = course_doc.owner == current_user
+        is_instructor = hasattr(course_doc, 'instructor') and course_doc.instructor == current_user
+        is_admin = "System Manager" in frappe.get_roles(current_user)
+
+        if not (is_owner or is_instructor or is_admin):
+            return {
+                "success": False,
+                "message": _("You don't have permission to update this course")
+            }
+
+        # Update fields
+        if title:
+            course_doc.title = title
+        if description and hasattr(course_doc, 'description'):
+            course_doc.description = description
+        if short_introduction and hasattr(course_doc, 'short_introduction'):
+            course_doc.short_introduction = short_introduction
+        if category and hasattr(course_doc, 'category'):
+            course_doc.category = category
+        if level:
+            if hasattr(course_doc, 'level'):
+                course_doc.level = level
+            elif hasattr(course_doc, 'difficulty'):
+                course_doc.difficulty = level
+        if price is not None:
+            if hasattr(course_doc, 'course_price'):
+                course_doc.course_price = flt(price)
+            if hasattr(course_doc, 'price'):
+                course_doc.price = flt(price)
+            if hasattr(course_doc, 'paid'):
+                course_doc.paid = 1 if flt(price) > 0 else 0
+        if duration and hasattr(course_doc, 'duration'):
+            course_doc.duration = duration
+        if image and hasattr(course_doc, 'image'):
+            course_doc.image = image
+        if is_featured is not None:
+            if hasattr(course_doc, 'featured'):
+                course_doc.featured = 1 if is_featured else 0
+            elif hasattr(course_doc, 'is_featured'):
+                course_doc.is_featured = 1 if is_featured else 0
+        if published is not None and hasattr(course_doc, 'published'):
+            course_doc.published = 1 if published else 0
+
+        course_doc.save()
+        frappe.db.commit()
+
+        return {
+            "success": True,
+            "message": _("Course updated successfully")
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Update course error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": str(e) if frappe.conf.developer_mode else _("An error occurred while updating the course")
+        }
+
+
+# ==================== LESSON DETAILS API ====================
+
+@frappe.whitelist(allow_guest=True)
+def get_lesson_details(lesson_id=None, course_id=None):
+    """
+    Get detailed lesson content
+
+    Args:
+        lesson_id: Lesson document name
+        course_id: Course ID (to verify access)
+
+    Returns:
+        {
+            "success": bool,
+            "lesson": Lesson object with content
+        }
+    """
+    try:
+        if not lesson_id:
+            return {
+                "success": False,
+                "message": _("Lesson ID is required")
+            }
+
+        if not frappe.db.exists("DocType", "Course Lesson"):
+            return {
+                "success": False,
+                "message": _("Course Lesson doctype not found")
+            }
+
+        if not frappe.db.exists("Course Lesson", lesson_id):
+            return {
+                "success": False,
+                "message": _("Lesson not found")
+            }
+
+        lesson_doc = frappe.get_doc("Course Lesson", lesson_id)
+        current_user = frappe.session.user
+
+        # Check if this is a preview lesson or user has access
+        is_preview = bool(lesson_doc.include_in_preview) if hasattr(lesson_doc, 'include_in_preview') else False
+        is_guest = current_user == "Guest"
+
+        # Get course info for enrollment check
+        course_name = None
+        if hasattr(lesson_doc, 'course') and lesson_doc.course:
+            course_name = lesson_doc.course
+        elif hasattr(lesson_doc, 'chapter') and lesson_doc.chapter:
+            chapter = frappe.get_doc("Course Chapter", lesson_doc.chapter)
+            course_name = chapter.course if hasattr(chapter, 'course') else None
+
+        # Check enrollment if not preview and not guest
+        has_access = is_preview
+        if not is_guest and course_name:
+            if frappe.db.exists("LMS Enrollment", {"course": course_name, "member": current_user}):
+                has_access = True
+            # Check if user is the course owner
+            if frappe.db.exists("LMS Course", course_name):
+                course_doc = frappe.get_doc("LMS Course", course_name)
+                if course_doc.owner == current_user:
+                    has_access = True
+                if hasattr(course_doc, 'instructor') and course_doc.instructor == current_user:
+                    has_access = True
+
+        # Return limited info for non-enrolled users on non-preview lessons
+        lesson_data = {
+            "id": lesson_doc.name,
+            "title": lesson_doc.title,
+            "isPreview": is_preview,
+            "order": lesson_doc.idx if hasattr(lesson_doc, 'idx') else 0,
+            "chapterId": lesson_doc.chapter if hasattr(lesson_doc, 'chapter') else None,
+            "courseId": course_name
+        }
+
+        if has_access:
+            # Include full content for enrolled users or preview lessons
+            lesson_data["content"] = lesson_doc.content if hasattr(lesson_doc, 'content') else ""
+            lesson_data["videoUrl"] = lesson_doc.video_url if hasattr(lesson_doc, 'video_url') else ""
+            lesson_data["duration"] = lesson_doc.duration if hasattr(lesson_doc, 'duration') else ""
+            lesson_data["youtubeVideoId"] = lesson_doc.youtube_video_id if hasattr(lesson_doc, 'youtube_video_id') else ""
+            lesson_data["quizId"] = lesson_doc.quiz_id if hasattr(lesson_doc, 'quiz_id') else None
+        else:
+            lesson_data["requiresEnrollment"] = True
+
+        return {
+            "success": True,
+            "lesson": lesson_data,
+            "hasAccess": has_access
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Get lesson details error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while fetching lesson details")
+        }
+
+
+@frappe.whitelist(allow_guest=True)
+def get_chapter_lessons(chapter_id=None):
+    """
+    Get all lessons for a chapter with details
+
+    Args:
+        chapter_id: Chapter document name
+
+    Returns:
+        {
+            "success": bool,
+            "lessons": Array of lesson objects
+        }
+    """
+    try:
+        if not chapter_id:
+            return {
+                "success": False,
+                "message": _("Chapter ID is required")
+            }
+
+        if not frappe.db.exists("DocType", "Course Chapter"):
+            return {
+                "success": False,
+                "message": _("Course Chapter doctype not found")
+            }
+
+        if not frappe.db.exists("Course Chapter", chapter_id):
+            return {
+                "success": False,
+                "message": _("Chapter not found")
+            }
+
+        chapter_doc = frappe.get_doc("Course Chapter", chapter_id)
+        current_user = frappe.session.user
+        is_guest = current_user == "Guest"
+
+        # Check enrollment
+        course_name = chapter_doc.course if hasattr(chapter_doc, 'course') else None
+        has_access = False
+
+        if not is_guest and course_name:
+            if frappe.db.exists("LMS Enrollment", {"course": course_name, "member": current_user}):
+                has_access = True
+            if frappe.db.exists("LMS Course", course_name):
+                course_doc = frappe.get_doc("LMS Course", course_name)
+                if course_doc.owner == current_user:
+                    has_access = True
+                if hasattr(course_doc, 'instructor') and course_doc.instructor == current_user:
+                    has_access = True
+
+        lessons = []
+        if frappe.db.exists("DocType", "Course Lesson"):
+            lesson_docs = frappe.get_all(
+                "Course Lesson",
+                filters={"chapter": chapter_id},
+                fields=["*"],
+                order_by="idx"
+            )
+
+            for lesson in lesson_docs:
+                is_preview = bool(lesson.get("include_in_preview", 0))
+
+                lesson_data = {
+                    "id": lesson.name,
+                    "title": lesson.title,
+                    "isPreview": is_preview,
+                    "order": lesson.idx or 0,
+                    "duration": lesson.get("duration", "")
+                }
+
+                # Include content for enrolled users or preview lessons
+                if has_access or is_preview:
+                    lesson_data["content"] = lesson.get("content", "")
+                    lesson_data["videoUrl"] = lesson.get("video_url", "")
+                    lesson_data["youtubeVideoId"] = lesson.get("youtube_video_id", "")
+                else:
+                    lesson_data["requiresEnrollment"] = True
+
+                lessons.append(lesson_data)
+
+        return {
+            "success": True,
+            "lessons": lessons,
+            "chapter": {
+                "id": chapter_doc.name,
+                "title": chapter_doc.title,
+                "description": chapter_doc.description if hasattr(chapter_doc, 'description') else "",
+                "courseId": course_name
+            },
+            "hasAccess": has_access
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Get chapter lessons error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while fetching chapter lessons")
+        }
+
+
+# ==================== COURSE PROGRESS API ====================
+
+@frappe.whitelist()
+def save_progress(
+    course_id=None,
+    lesson_id=None,
+    chapter_id=None,
+    progress_percent=None,
+    is_completed=False,
+    video_position=None,
+    notes=None
+):
+    """
+    Save or update course/lesson progress for a user
+
+    Args:
+        course_id: Course document name (required)
+        lesson_id: Lesson document name (optional)
+        chapter_id: Chapter document name (optional)
+        progress_percent: Progress percentage (0-100)
+        is_completed: Whether the item is completed
+        video_position: Current video position in seconds
+        notes: User notes for the lesson
+
+    Returns:
+        {
+            "success": bool,
+            "message": Status message
+        }
+    """
+    try:
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required to save progress")
+            }
+
+        if not course_id:
+            return {
+                "success": False,
+                "message": _("Course ID is required")
+            }
+
+        if not frappe.db.exists("LMS Course", course_id):
+            return {
+                "success": False,
+                "message": _("Course not found")
+            }
+
+        # Check if LMS Course Progress doctype exists, create if not
+        progress_doctype = "LMS Course Progress"
+        if not frappe.db.exists("DocType", progress_doctype):
+            # Try alternative doctypes
+            if frappe.db.exists("DocType", "Course Progress"):
+                progress_doctype = "Course Progress"
+            else:
+                # Create a simple progress tracking using custom doctype or cache
+                # For now, use cache-based progress tracking
+                cache_key = f"course_progress:{current_user}:{course_id}"
+                if lesson_id:
+                    cache_key = f"lesson_progress:{current_user}:{lesson_id}"
+
+                progress_data = {
+                    "user": current_user,
+                    "course_id": course_id,
+                    "lesson_id": lesson_id,
+                    "chapter_id": chapter_id,
+                    "progress_percent": flt(progress_percent) if progress_percent else 0,
+                    "is_completed": bool(is_completed),
+                    "video_position": cint(video_position) if video_position else 0,
+                    "notes": notes or "",
+                    "updated_at": frappe.utils.now()
+                }
+
+                frappe.cache().set_value(cache_key, json.dumps(progress_data), expires_in_sec=86400 * 365)  # 1 year
+
+                return {
+                    "success": True,
+                    "message": _("Progress saved successfully")
+                }
+
+        # Use doctype-based progress tracking
+        filters = {"course": course_id, "member": current_user}
+        if lesson_id:
+            filters["lesson"] = lesson_id
+
+        existing = frappe.get_all(progress_doctype, filters=filters, limit=1)
+
+        if existing:
+            progress_doc = frappe.get_doc(progress_doctype, existing[0].name)
+        else:
+            progress_doc = frappe.new_doc(progress_doctype)
+            progress_doc.course = course_id
+            progress_doc.member = current_user
+            if lesson_id and hasattr(progress_doc, 'lesson'):
+                progress_doc.lesson = lesson_id
+            if chapter_id and hasattr(progress_doc, 'chapter'):
+                progress_doc.chapter = chapter_id
+
+        # Update progress fields
+        if progress_percent is not None and hasattr(progress_doc, 'progress'):
+            progress_doc.progress = flt(progress_percent)
+        if is_completed and hasattr(progress_doc, 'is_complete'):
+            progress_doc.is_complete = 1
+        if video_position is not None and hasattr(progress_doc, 'video_position'):
+            progress_doc.video_position = cint(video_position)
+        if notes and hasattr(progress_doc, 'notes'):
+            progress_doc.notes = notes
+
+        progress_doc.save(ignore_permissions=True)
+        frappe.db.commit()
+
+        return {
+            "success": True,
+            "message": _("Progress saved successfully")
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Save progress error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": str(e) if frappe.conf.developer_mode else _("An error occurred while saving progress")
+        }
+
+
+@frappe.whitelist()
+def get_progress(course_id=None, lesson_id=None):
+    """
+    Get course/lesson progress for current user
+
+    Args:
+        course_id: Course document name (required)
+        lesson_id: Optional lesson ID for specific lesson progress
+
+    Returns:
+        {
+            "success": bool,
+            "progress": Progress object or array of lesson progress
+        }
+    """
+    try:
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required to view progress")
+            }
+
+        if not course_id:
+            return {
+                "success": False,
+                "message": _("Course ID is required")
+            }
+
+        # Check for progress doctype
+        progress_doctype = "LMS Course Progress"
+        if not frappe.db.exists("DocType", progress_doctype):
+            if frappe.db.exists("DocType", "Course Progress"):
+                progress_doctype = "Course Progress"
+            else:
+                # Use cache-based progress
+                if lesson_id:
+                    cache_key = f"lesson_progress:{current_user}:{lesson_id}"
+                    cached = frappe.cache().get_value(cache_key)
+                    if cached:
+                        return {
+                            "success": True,
+                            "progress": json.loads(cached)
+                        }
+                else:
+                    # Get all lesson progress for course
+                    course_progress = []
+                    if frappe.db.exists("DocType", "Course Chapter"):
+                        chapters = frappe.get_all("Course Chapter", filters={"course": course_id}, fields=["name"])
+                        for chapter in chapters:
+                            if frappe.db.exists("DocType", "Course Lesson"):
+                                lessons = frappe.get_all("Course Lesson", filters={"chapter": chapter.name}, fields=["name"])
+                                for lesson in lessons:
+                                    cache_key = f"lesson_progress:{current_user}:{lesson.name}"
+                                    cached = frappe.cache().get_value(cache_key)
+                                    if cached:
+                                        course_progress.append(json.loads(cached))
+
+                    # Calculate overall progress
+                    total_lessons = sum([len(frappe.get_all("Course Lesson", filters={"chapter": c.name}))
+                                        for c in frappe.get_all("Course Chapter", filters={"course": course_id})])
+                    completed_lessons = len([p for p in course_progress if p.get("is_completed")])
+                    overall_percent = (completed_lessons / total_lessons * 100) if total_lessons > 0 else 0
+
+                    return {
+                        "success": True,
+                        "progress": {
+                            "courseId": course_id,
+                            "overallProgress": round(overall_percent, 1),
+                            "completedLessons": completed_lessons,
+                            "totalLessons": total_lessons,
+                            "lessonProgress": course_progress
+                        }
+                    }
+
+                return {
+                    "success": True,
+                    "progress": None
+                }
+
+        # Use doctype-based progress
+        if lesson_id:
+            progress = frappe.get_all(
+                progress_doctype,
+                filters={"course": course_id, "member": current_user, "lesson": lesson_id},
+                fields=["*"],
+                limit=1
+            )
+            if progress:
+                return {
+                    "success": True,
+                    "progress": {
+                        "lessonId": lesson_id,
+                        "progressPercent": progress[0].get("progress", 0),
+                        "isCompleted": bool(progress[0].get("is_complete", 0)),
+                        "videoPosition": progress[0].get("video_position", 0),
+                        "notes": progress[0].get("notes", "")
+                    }
+                }
+        else:
+            # Get all progress for course
+            all_progress = frappe.get_all(
+                progress_doctype,
+                filters={"course": course_id, "member": current_user},
+                fields=["*"]
+            )
+
+            total_lessons = 0
+            if frappe.db.exists("DocType", "Course Chapter"):
+                chapters = frappe.get_all("Course Chapter", filters={"course": course_id})
+                for chapter in chapters:
+                    if frappe.db.exists("DocType", "Course Lesson"):
+                        total_lessons += frappe.db.count("Course Lesson", {"chapter": chapter.name})
+
+            completed = len([p for p in all_progress if p.get("is_complete")])
+            overall = (completed / total_lessons * 100) if total_lessons > 0 else 0
+
+            return {
+                "success": True,
+                "progress": {
+                    "courseId": course_id,
+                    "overallProgress": round(overall, 1),
+                    "completedLessons": completed,
+                    "totalLessons": total_lessons,
+                    "lessonProgress": [{
+                        "lessonId": p.get("lesson"),
+                        "progressPercent": p.get("progress", 0),
+                        "isCompleted": bool(p.get("is_complete", 0)),
+                        "videoPosition": p.get("video_position", 0)
+                    } for p in all_progress]
+                }
+            }
+
+        return {
+            "success": True,
+            "progress": None
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Get progress error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while fetching progress")
+        }
+
+
+@frappe.whitelist()
+def mark_lesson_complete(lesson_id=None, course_id=None):
+    """
+    Mark a lesson as completed
+
+    Args:
+        lesson_id: Lesson document name (required)
+        course_id: Course document name (optional, will be derived if not provided)
+
+    Returns:
+        {
+            "success": bool,
+            "message": Status message,
+            "courseProgress": Updated overall course progress
+        }
+    """
+    try:
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required")
+            }
+
+        if not lesson_id:
+            return {
+                "success": False,
+                "message": _("Lesson ID is required")
+            }
+
+        # Get course_id from lesson if not provided
+        if not course_id:
+            if frappe.db.exists("DocType", "Course Lesson"):
+                lesson = frappe.get_doc("Course Lesson", lesson_id)
+                if hasattr(lesson, 'course') and lesson.course:
+                    course_id = lesson.course
+                elif hasattr(lesson, 'chapter') and lesson.chapter:
+                    chapter = frappe.get_doc("Course Chapter", lesson.chapter)
+                    course_id = chapter.course if hasattr(chapter, 'course') else None
+
+        if not course_id:
+            return {
+                "success": False,
+                "message": _("Could not determine course for this lesson")
+            }
+
+        # Save progress
+        result = save_progress(
+            course_id=course_id,
+            lesson_id=lesson_id,
+            progress_percent=100,
+            is_completed=True
+        )
+
+        if not result.get("success"):
+            return result
+
+        # Get updated course progress
+        progress_result = get_progress(course_id=course_id)
+
+        return {
+            "success": True,
+            "message": _("Lesson marked as complete"),
+            "courseProgress": progress_result.get("progress") if progress_result.get("success") else None
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Mark lesson complete error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while marking lesson complete")
+        }
+
+
+# ==================== LIVE CLASSES API ====================
+
+@frappe.whitelist(allow_guest=True)
+def get_live_classes(
+    course_id=None,
+    instructor_id=None,
+    status=None,
+    upcoming_only=False,
+    page=1,
+    page_size=10
+):
+    """
+    Get live classes with optional filtering
+
+    Args:
+        course_id: Filter by course
+        instructor_id: Filter by instructor
+        status: Filter by status (scheduled, live, completed, cancelled)
+        upcoming_only: Only return upcoming classes
+        page: Page number
+        page_size: Items per page
+
+    Returns:
+        {
+            "success": bool,
+            "liveClasses": Array of live class objects,
+            "totalCount": Total matching classes
+        }
+    """
+    try:
+        page = cint(page) or 1
+        page_size = cint(page_size) or 10
+
+        # Check if Live Class doctype exists
+        live_class_doctype = "LMS Live Class"
+        if not frappe.db.exists("DocType", live_class_doctype):
+            if frappe.db.exists("DocType", "Live Class"):
+                live_class_doctype = "Live Class"
+            else:
+                # Return empty if doctype doesn't exist
+                return {
+                    "success": True,
+                    "liveClasses": [],
+                    "totalCount": 0,
+                    "message": _("Live class feature not configured")
+                }
+
+        # Build filters
+        filters = {}
+        if course_id:
+            filters["course"] = course_id
+        if instructor_id:
+            if frappe.db.has_column(live_class_doctype, "instructor"):
+                filters["instructor"] = instructor_id
+            else:
+                filters["owner"] = instructor_id
+        if status:
+            if frappe.db.has_column(live_class_doctype, "status"):
+                filters["status"] = status
+
+        # Get live classes
+        live_classes = frappe.get_all(
+            live_class_doctype,
+            filters=filters,
+            fields=["*"],
+            order_by="creation desc"
+        )
+
+        # Filter upcoming if requested
+        if upcoming_only:
+            from frappe.utils import now_datetime, get_datetime
+            current_time = now_datetime()
+            live_classes = [
+                lc for lc in live_classes
+                if (hasattr(lc, 'start_time') or lc.get('start_time')) and
+                get_datetime(lc.get('start_time') or lc.start_time) > current_time
+            ]
+
+        # Format for frontend
+        formatted_classes = []
+        for lc in live_classes:
+            instructor_info = {"id": "", "name": "", "avatar": ""}
+            instructor_id = lc.get("instructor") or lc.get("owner")
+            if instructor_id and frappe.db.exists("User", instructor_id):
+                user = frappe.get_doc("User", instructor_id)
+                instructor_info = {
+                    "id": instructor_id,
+                    "name": user.full_name or instructor_id,
+                    "avatar": user.user_image or ""
+                }
+
+            formatted_classes.append({
+                "id": lc.name,
+                "title": lc.get("title") or lc.get("class_title") or "Live Class",
+                "description": lc.get("description") or "",
+                "courseId": lc.get("course") or "",
+                "instructor": instructor_info,
+                "startTime": str(lc.get("start_time") or ""),
+                "endTime": str(lc.get("end_time") or ""),
+                "duration": lc.get("duration") or "",
+                "status": lc.get("status") or "scheduled",
+                "meetingUrl": lc.get("meeting_url") or lc.get("zoom_link") or "",
+                "meetingId": lc.get("meeting_id") or "",
+                "maxParticipants": cint(lc.get("max_participants")) or 0,
+                "currentParticipants": cint(lc.get("current_participants")) or 0,
+                "isRecorded": bool(lc.get("is_recorded") or lc.get("record_session")),
+                "recordingUrl": lc.get("recording_url") or "",
+                "createdAt": str(lc.creation) if hasattr(lc, 'creation') else ""
+            })
+
+        # Pagination
+        total_count = len(formatted_classes)
+        total_pages = (total_count + page_size - 1) // page_size
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated = formatted_classes[start_idx:end_idx]
+
+        return {
+            "success": True,
+            "liveClasses": paginated,
+            "totalCount": total_count,
+            "currentPage": page,
+            "totalPages": total_pages,
+            "pageSize": page_size
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Get live classes error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "liveClasses": [],
+            "message": _("An error occurred while fetching live classes")
+        }
+
+
+@frappe.whitelist(allow_guest=True)
+def get_live_class(class_id=None):
+    """
+    Get single live class details
+
+    Args:
+        class_id: Live class document name
+
+    Returns:
+        {
+            "success": bool,
+            "liveClass": Live class object
+        }
+    """
+    try:
+        if not class_id:
+            return {
+                "success": False,
+                "message": _("Live class ID is required")
+            }
+
+        live_class_doctype = "LMS Live Class"
+        if not frappe.db.exists("DocType", live_class_doctype):
+            if frappe.db.exists("DocType", "Live Class"):
+                live_class_doctype = "Live Class"
+            else:
+                return {
+                    "success": False,
+                    "message": _("Live class feature not configured")
+                }
+
+        if not frappe.db.exists(live_class_doctype, class_id):
+            return {
+                "success": False,
+                "message": _("Live class not found")
+            }
+
+        lc = frappe.get_doc(live_class_doctype, class_id)
+
+        instructor_info = {"id": "", "name": "", "avatar": ""}
+        instructor_id = lc.instructor if hasattr(lc, 'instructor') else lc.owner
+        if instructor_id and frappe.db.exists("User", instructor_id):
+            user = frappe.get_doc("User", instructor_id)
+            instructor_info = {
+                "id": instructor_id,
+                "name": user.full_name or instructor_id,
+                "avatar": user.user_image or ""
+            }
+
+        return {
+            "success": True,
+            "liveClass": {
+                "id": lc.name,
+                "title": lc.title if hasattr(lc, 'title') else lc.name,
+                "description": lc.description if hasattr(lc, 'description') else "",
+                "courseId": lc.course if hasattr(lc, 'course') else "",
+                "instructor": instructor_info,
+                "startTime": str(lc.start_time) if hasattr(lc, 'start_time') else "",
+                "endTime": str(lc.end_time) if hasattr(lc, 'end_time') else "",
+                "duration": lc.duration if hasattr(lc, 'duration') else "",
+                "status": lc.status if hasattr(lc, 'status') else "scheduled",
+                "meetingUrl": lc.meeting_url if hasattr(lc, 'meeting_url') else "",
+                "meetingId": lc.meeting_id if hasattr(lc, 'meeting_id') else "",
+                "maxParticipants": cint(lc.max_participants) if hasattr(lc, 'max_participants') else 0,
+                "isRecorded": bool(lc.is_recorded) if hasattr(lc, 'is_recorded') else False,
+                "recordingUrl": lc.recording_url if hasattr(lc, 'recording_url') else "",
+                "agenda": lc.agenda if hasattr(lc, 'agenda') else "",
+                "prerequisites": lc.prerequisites if hasattr(lc, 'prerequisites') else "",
+                "createdAt": str(lc.creation)
+            }
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Get live class error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while fetching live class details")
+        }
+
+
+@frappe.whitelist()
+def create_live_class(
+    title=None,
+    course_id=None,
+    description=None,
+    start_time=None,
+    end_time=None,
+    duration=None,
+    meeting_url=None,
+    max_participants=None,
+    is_recorded=False,
+    agenda=None
+):
+    """
+    Create a new live class (instructor only)
+
+    Args:
+        title: Class title (required)
+        course_id: Associated course
+        description: Class description
+        start_time: Start datetime
+        end_time: End datetime
+        duration: Duration string
+        meeting_url: Meeting/Zoom URL
+        max_participants: Maximum participants allowed
+        is_recorded: Whether to record the session
+        agenda: Class agenda
+
+    Returns:
+        {
+            "success": bool,
+            "liveClassId": Created class ID
+        }
+    """
+    try:
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required")
+            }
+
+        if not title:
+            return {
+                "success": False,
+                "message": _("Title is required")
+            }
+
+        live_class_doctype = "LMS Live Class"
+        if not frappe.db.exists("DocType", live_class_doctype):
+            if frappe.db.exists("DocType", "Live Class"):
+                live_class_doctype = "Live Class"
+            else:
+                return {
+                    "success": False,
+                    "message": _("Live class feature not configured. DocType not found.")
+                }
+
+        lc = frappe.new_doc(live_class_doctype)
+        lc.title = title
+        lc.owner = current_user
+
+        if hasattr(lc, 'instructor'):
+            lc.instructor = current_user
+        if course_id and hasattr(lc, 'course'):
+            lc.course = course_id
+        if description and hasattr(lc, 'description'):
+            lc.description = description
+        if start_time and hasattr(lc, 'start_time'):
+            lc.start_time = start_time
+        if end_time and hasattr(lc, 'end_time'):
+            lc.end_time = end_time
+        if duration and hasattr(lc, 'duration'):
+            lc.duration = duration
+        if meeting_url and hasattr(lc, 'meeting_url'):
+            lc.meeting_url = meeting_url
+        if max_participants and hasattr(lc, 'max_participants'):
+            lc.max_participants = cint(max_participants)
+        if is_recorded and hasattr(lc, 'is_recorded'):
+            lc.is_recorded = 1
+        if agenda and hasattr(lc, 'agenda'):
+            lc.agenda = agenda
+
+        if hasattr(lc, 'status'):
+            lc.status = "scheduled"
+
+        lc.insert()
+        frappe.db.commit()
+
+        return {
+            "success": True,
+            "liveClassId": lc.name,
+            "message": _("Live class created successfully")
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Create live class error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": str(e) if frappe.conf.developer_mode else _("An error occurred while creating live class")
+        }
+
+
+@frappe.whitelist()
+def join_live_class(class_id=None):
+    """
+    Join a live class (registers attendance)
+
+    Args:
+        class_id: Live class document name
+
+    Returns:
+        {
+            "success": bool,
+            "meetingUrl": URL to join the meeting
+        }
+    """
+    try:
+        current_user = frappe.session.user
+        if current_user == "Guest":
+            return {
+                "success": False,
+                "message": _("Authentication required to join live class")
+            }
+
+        if not class_id:
+            return {
+                "success": False,
+                "message": _("Live class ID is required")
+            }
+
+        live_class_doctype = "LMS Live Class"
+        if not frappe.db.exists("DocType", live_class_doctype):
+            if frappe.db.exists("DocType", "Live Class"):
+                live_class_doctype = "Live Class"
+            else:
+                return {
+                    "success": False,
+                    "message": _("Live class feature not configured")
+                }
+
+        if not frappe.db.exists(live_class_doctype, class_id):
+            return {
+                "success": False,
+                "message": _("Live class not found")
+            }
+
+        lc = frappe.get_doc(live_class_doctype, class_id)
+
+        # Check if class is live or scheduled
+        status = lc.status if hasattr(lc, 'status') else "scheduled"
+        if status == "completed":
+            return {
+                "success": False,
+                "message": _("This live class has ended")
+            }
+        if status == "cancelled":
+            return {
+                "success": False,
+                "message": _("This live class has been cancelled")
+            }
+
+        # Record attendance (using cache if doctype doesn't exist)
+        attendance_key = f"live_class_attendance:{class_id}"
+        attendees = frappe.cache().get_value(attendance_key)
+        if attendees:
+            attendees = json.loads(attendees)
+        else:
+            attendees = []
+
+        if current_user not in attendees:
+            attendees.append(current_user)
+            frappe.cache().set_value(attendance_key, json.dumps(attendees), expires_in_sec=86400)
+
+            # Update participant count if field exists
+            if hasattr(lc, 'current_participants'):
+                lc.current_participants = len(attendees)
+                lc.save(ignore_permissions=True)
+                frappe.db.commit()
+
+        meeting_url = lc.meeting_url if hasattr(lc, 'meeting_url') else ""
+
+        return {
+            "success": True,
+            "meetingUrl": meeting_url,
+            "message": _("Joined live class successfully")
+        }
+
+    except Exception as e:
+        frappe.log_error(f"Join live class error: {str(e)}", "Course API")
+        return {
+            "success": False,
+            "message": _("An error occurred while joining live class")
         }
