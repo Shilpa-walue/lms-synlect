@@ -1608,6 +1608,24 @@ def get_live_classes(
                     "avatar": user.user_image or ""
                 }
 
+            # Get meeting URL from various possible field names
+            meeting_url = (
+                lc.get("meeting_url") or
+                lc.get("zoom_link") or
+                lc.get("join_url") or
+                lc.get("start_url") or
+                lc.get("url") or
+                lc.get("link") or
+                ""
+            )
+
+            # Get meeting ID
+            meeting_id = lc.get("meeting_id") or lc.get("zoom_meeting_id") or ""
+
+            # If no meeting URL but we have meeting ID, construct Zoom URL
+            if not meeting_url and meeting_id:
+                meeting_url = f"https://zoom.us/j/{meeting_id}"
+
             formatted_classes.append({
                 "id": lc.name,
                 "title": lc.get("title") or lc.get("class_title") or "Live Class",
@@ -1618,8 +1636,8 @@ def get_live_classes(
                 "endTime": str(lc.get("end_time") or ""),
                 "duration": lc.get("duration") or "",
                 "status": lc.get("status") or "scheduled",
-                "meetingUrl": lc.get("meeting_url") or lc.get("zoom_link") or "",
-                "meetingId": lc.get("meeting_id") or "",
+                "meetingUrl": meeting_url,
+                "meetingId": meeting_id,
                 "maxParticipants": cint(lc.get("max_participants")) or 0,
                 "currentParticipants": cint(lc.get("current_participants")) or 0,
                 "isRecorded": bool(lc.get("is_recorded") or lc.get("record_session")),
